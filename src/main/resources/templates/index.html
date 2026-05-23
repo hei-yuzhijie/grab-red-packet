@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>并发抢红包系统</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 30px auto;
+            padding: 20px;
+            background: #f7f7f7;
+        }
+        .box {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h2 {
+            margin-bottom: 15px;
+            color: #e64340;
+        }
+        input, select, button {
+            width: 100%;
+            padding: 10px;
+            margin: 8px 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        button {
+            background: #e64340;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #c7312e;
+        }
+        #result {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 6px;
+            display: none;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .success {
+            background: #e6f7e6;
+            color: #0a8f0a;
+            border: 1px solid #90e990;
+        }
+        .error {
+            background: #ffe6e6;
+            color: #d00000;
+            border: 1px solid #ff9090;
+        }
+    </style>
+</head>
+<body>
+
+<div class="box">
+    <h2>🧧 发红包</h2>
+    <input type="text" id="creatorId" placeholder="发送者ID" value="user1001">
+    <input type="number" id="totalAmount" placeholder="总金额（元）" value="100">
+    <input type="number" id="totalCount" placeholder="红包数量" value="10">
+    <select id="type">
+        <option value="NORMAL">普通红包</option>
+        <option value="RANDOM">随机红包</option>
+    </select>
+    <input type="text" id="wish" placeholder="祝福语" value="恭喜发财">
+    <button onclick="sendRedPacket()">发送红包</button>
+</div>
+<div id="result"></div>
+<div class="box">
+    <h2>🎯 单人抢红包</h2>
+    <input type="text" id="redPacketId" placeholder="红包ID">
+    <input type="text" id="userId" placeholder="用户ID">
+    <button onclick="grabRedPacket()">立即抢红包</button>
+</div>
+
+<!-- 单窗口并发批量抢 -->
+<div class="box">
+    <h2>⚡ 单窗口并发测试</h2>
+    <input type="text" id="batchRedId" placeholder="填入待抢红包ID">
+    <input type="number" id="batchNum" placeholder="并发人数" value="20">
+    <button onclick="batchConcurrentGrab()">一键并发抢夺</button>
+</div>
+
+<div class="box">
+    <h2>📄 红包详情</h2>
+    <input type="text" id="detailId" placeholder="红包ID">
+    <button onclick="getDetail()">查看详情</button>
+</div>
+
+
+
+<script>
+    // 发红包
+    function sendRedPacket() {
+        let data = {
+            creatorId: document.getElementById("creatorId").value,
+            totalAmount: document.getElementById("totalAmount").value,
+            totalCount: document.getElementById("totalCount").value,
+            type: document.getElementById("type").value,
+            wish: document.getElementById("wish").value
+        };
+
+        fetch("/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams(data)
+        })
+            .then(res => {
+                // 先打印原始响应
+                console.log("原始HTTP响应:", res);
+                return res.json();
+            })
+            .then(resp => {
+                // 打印最终拿到的数据
+                console.log("后端返回JSON:", resp);
+
+                // 安全取值
+                let code = resp?.code || -1;
+                let message = resp?.message || resp?.msg || "操作成功";
+                let redPacketId = resp?.data?.redPacketId || "";
+
+                if (code === 200 && redPacketId) {
+                    showResult(true, message + " → ID：" + redPacketId);
+                    document.getElementById("redPacketId").value = redPacketId;
+                    document.getElementById("batchRedId").value = redPacketId;
+                } else {
+                    showResult(false, "失败：" + message);
+                }
+            })
+            .catch(e => {
+                console.error("请求异常：", e);
+                showResult(false, "请求失败，请查看控制台");
+            });
+    }
+
+    // 单人抢
+    function grabRedPacket() {
+        let data = {
+            redPacketId: document.getElementById("redPacketId").value,
+            userId: document.getElementById("userId").value
+        };
+        fetch("/grab", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams(data)
+        }).then(res => res.json())
+            .then(resp => {
+                showResult(resp.code === 200, resp.msg || resp.message);
+            }).catch(e=>showResult(false,"抢红包请求失败"));
+    }
+
+    // 单窗口批量并发请求
+    async function batchConcurrentGrab(){
+        const redId = document.getElementById("batchRedId").value;
+        const count = parseInt(document.getElementById("batchNum").value);
+        if(!redId || isNaN(count) || count <=0){
+            showResult(false,"请填写合法红包ID和并发人数");
+            return;
+        }
+        let reqList = [];
+        let logText = "并发请求开始，总人数："+count+"\n";
+        document.getElementById("result").innerText = logText;
+        document.getElementById("result").style.display = "block";
+        document.getElementById("result").className = "success";
+
+        for(let i=1;i<=count;i++){
+            let uid = "batch_user_"+i;
+            let formData = new URLSearchParams();
+            formData.append("redPacketId",redId);
+            formData.append("userId",uid);
+            let p = fetch("/grab",{
+                method:"POST",
+                headers:{"Content-Type":"application/x-www-form-urlencoded"},
+                body:formData
+            }).then(res=>res.json()).then(res=>{
+                return `用户${uid}：${res.msg || res.message}`;
+            }).catch(()=>{
+                return `用户${uid}：请求异常`;
+            });
+            reqList.push(p);
+        }
+        let allRes = await Promise.all(reqList);
+        logText += allRes.join("\n");
+        document.getElementById("result").innerText = logText;
+    }
+
+    // 查询详情
+    function getDetail() {
+        let id = document.getElementById("detailId").value;
+        fetch(`/detail/${id}`)
+            .then(res => res.json())
+            .then(resp => {
+                showResult(resp.code === 200, JSON.stringify(resp.data, null, 2));
+            }).catch(e=>showResult(false,"查询失败"));
+    }
+
+    function showResult(isSuccess, text) {
+        let result = document.getElementById("result");
+        result.style.display = "block";
+        result.className = isSuccess ? "success" : "error";
+        result.innerText = text;
+    }
+</script>
+</body>
+</html>
