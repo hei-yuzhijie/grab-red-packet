@@ -1,6 +1,7 @@
 package yuzhijie.redpacket.service;
 
 import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 
@@ -21,9 +22,11 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+@Slf4j
 @Service
 public class RedPacketService {
     @Autowired
@@ -56,6 +59,7 @@ public class RedPacketService {
             amounts = randomStrategy.allocate(totalAmount, totalCount);
         }
         String listKey = AMOUNT_LIST_PREFIX + redPacketId;
+        String grabUserKey = GRAB_USER_PREFIX + redPacketId;
         //错误：直接传入 amountsString（一个 List<String> 对象）时，它被当作 单个元素 处理
         List<String> amountsString = amounts.stream().map(BigDecimal::toString).toList();
         redisTemplate.opsForList().rightPushAll(listKey, amountsString.toArray(new String[0]));
@@ -78,6 +82,10 @@ public class RedPacketService {
         redisTemplate.opsForValue().set(detailKey, redPacket);
         redisTemplate.expire(detailKey, 24 , TimeUnit.HOURS);
 
+        redisTemplate.opsForSet().add(grabUserKey, "init");
+        redisTemplate.expire(grabUserKey, 24, TimeUnit.HOURS);
+
+
         return redPacketId;
     }
     public GrabResult grabRedPacket(String redPacketId, String userId) {
@@ -91,9 +99,20 @@ public class RedPacketService {
         String listKey = AMOUNT_LIST_PREFIX + redPacketId;
         //红包过期情况
 
-        Long expireSeconds = redisTemplate.getExpire(listKey);
-        if(expireSeconds == -2) {
-            updateRedPacketStatus(redPacketId,4);
+        RedPacket redPacket = (RedPacket) redisTemplate.opsForValue().get(detailKey);
+        if (redPacket == null) {
+            grabResult.setSuccess(false);
+            grabResult.setMessage("红包不存在");
+            return grabResult;
+        }
+
+        // 检查过期时间
+        if (redPacket.getExpireTime().isBefore(LocalDateTime.now())) {
+            // 更新状态为过期（幂等）
+            if (redPacket.getStatus() != 4) {
+                redPacket.setStatus(4);
+                redisTemplate.opsForValue().set(detailKey, redPacket);
+            }
             grabResult.setSuccess(false);
             grabResult.setMessage("红包已过期");
             return grabResult;
@@ -110,36 +129,35 @@ public class RedPacketService {
                     operations.watch(Arrays.asList(grabUserKey, listKey));
                     boolean isMember = operations.opsForSet().isMember(grabUserKey, userId);
                     if (isMember) {
-                        return new ArrayList<>(Arrays.asList("该用户已抢过红包"));
+                        return Collections.singletonList("DUPLICATE");
                     }
                     Long size = operations.opsForList().size(listKey);
                     if (size == null || size == 0) {
-                        return new ArrayList<>(Arrays.asList("红包已抢完"));
+                        return Collections.singletonList("EMPTY");
                     }
                     operations.multi();
-                    operations.opsForList().leftPop(listKey);
                     operations.opsForSet().add(grabUserKey, userId);
+                    operations.opsForList().leftPop(listKey);
                     return operations.exec();
                 }
             });
 
-            if (execute == null) {
+            if (execute == null || execute.isEmpty()) {
                 continue;
             }
 
-            if (execute.get(0) instanceof String) {
+            if (execute.get(0).equals("DUPLICATE")) {
                 grabResult.setSuccess(false);
-                grabResult.setMessage((String) execute.get(0));
+                grabResult.setMessage("该用户已抢过红包");
                 return grabResult;
             }
-
-            Object amountObj = execute.get(0);
-            if (amountObj == null) {
+            if (execute.get(0).equals("EMPTY")) {
                 grabResult.setSuccess(false);
                 grabResult.setMessage("红包已抢完");
                 return grabResult;
             }
 
+            Object amountObj = execute.get(1);
             BigDecimal amount = new BigDecimal(amountObj.toString());
             grabResult.setSuccess(true);
             grabResult.setAmount(amount);
@@ -161,11 +179,16 @@ public class RedPacketService {
     /**
      * 更新红包详情(专门用于抢红包成功后的结果录入)
      * 虽然是异步执行，但是调用时必然成功抢到红包
+     * 改进方向（继续封装为原子性）
      * @param redPacketId
      * @param amount
      */
     private void updateRedPacketDetail(String redPacketId, BigDecimal amount) {
+
+
         String detailKey = DETAIL_PREFIX + redPacketId;
+        // 获取剩余的过期时间（单位：秒）
+        Long ttl = redisTemplate.getExpire(detailKey, TimeUnit.SECONDS);
         RedPacket redPacket = (RedPacket) redisTemplate.opsForValue().get(detailKey);
 
         redPacket.setRemainAmount(redPacket.getRemainAmount().subtract(amount));
@@ -175,6 +198,11 @@ public class RedPacketService {
         } else {
             redPacket.setStatus(2);
         }
+//        log.info("更新红包详情：{}",redPacket);
+        redisTemplate.opsForValue().set(detailKey,redPacket);
+        if (ttl != null && ttl > 0) {
+            redisTemplate.expire(detailKey, ttl, TimeUnit.SECONDS);
+        }
     }
 
     /**
@@ -182,7 +210,7 @@ public class RedPacketService {
      * @param redPacketId
      * @param status
      */
-    public void updateRedPacketStatus(String redPacketId, Integer status) {
+    private void updateRedPacketStatus(String redPacketId, Integer status) {
         String detailKey = DETAIL_PREFIX + redPacketId;
         RedPacket redPacket = (RedPacket)redisTemplate.opsForValue().get(detailKey);
         redPacket.setStatus(status);
@@ -199,6 +227,7 @@ public class RedPacketService {
         record.setGrabTime(LocalDateTime.now());
         //暂不计算手气最佳
         record.setIsLucky(0);
+//        log.info("保存抢红包记录：{}",record);
         redisTemplate.opsForList().rightPush(recordKey, record);
         redisTemplate.expire(recordKey, 24, TimeUnit.HOURS);
 

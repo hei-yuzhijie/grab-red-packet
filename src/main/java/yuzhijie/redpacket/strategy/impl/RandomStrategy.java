@@ -45,7 +45,7 @@ public class RandomStrategy implements RedPacketStrategy {
             remainAmount = remainAmount.subtract(randomAmount);
             remainCount--;
         }
-
+        redPackets.add(remainAmount);
         return redPackets;
     }
     private BigDecimal nextRandomAmount(BigDecimal min, BigDecimal max) {

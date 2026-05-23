@@ -93,11 +93,11 @@ public class RedPacketController {
 
         try {
             GrabResult grabResult = redPacketService.grabRedPacket(redPacketId, userId);
-
+            log.info("{}",grabResult);
             if (grabResult.isSuccess()) {
                 return ApiResponse.success("抢红包成功", grabResult);
             } else {
-                return ApiResponse.error(400, grabResult.getMessage());
+                return ApiResponse.success("抢红包失败", grabResult);
             }
         } catch (Exception e) {
             log.info("{}",e);
