@@ -184,6 +184,7 @@ public class RedPacketService {
             grabResult.setMessage("抢红包成功");
 
             // 更新红包详情 + 记录
+            // 可以采用异步操作
             updateRedPacketDetail(redPacketId, amount);
             saveGrabRecord(redPacketId, userId, amount);
 
@@ -241,7 +242,13 @@ public class RedPacketService {
         record.setUserId(userId);
         record.setAmount(amount);
         record.setGrabTime(LocalDateTime.now());
-        //暂不计算手气最佳
+
+        //在手气最佳实时判定的场景中，将“当前最大金额”和“获得最大金额的用户ID”作为红包详情的两个独立字段存储
+        //在partDetailKey中，添加maxAmount (当前已抢到的最大金额),maxUserId (获得该最大金额的用户ID)
+        //在Lua中动态维护these two fields
+        //红包抢完后，直接读取 maxUserId 即可获得手气最佳
+        //这里暂不计算手气最佳
+
         record.setIsLucky(0);
 //        log.info("保存抢红包记录：{}",record);
         redisTemplate.opsForList().rightPush(recordKey, record);
