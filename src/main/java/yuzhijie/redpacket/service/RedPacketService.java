@@ -5,11 +5,16 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.RedisOperations;
 import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.serializer.RedisSerializer;
+import org.springframework.scripting.support.ResourceScriptSource;
 import org.springframework.stereotype.Service;
 import yuzhijie.redpacket.common.RedisUtil;
 import yuzhijie.redpacket.model.GrabRecord;
@@ -20,10 +25,7 @@ import yuzhijie.redpacket.strategy.RedPacketStrategy;
 import java.lang.reflect.Array;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -31,6 +33,9 @@ import java.util.concurrent.TimeUnit;
 public class RedPacketService {
     @Autowired
     private RedisTemplate<String, Object> redisTemplate;
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
 
     @Autowired
     @Qualifier("randomStrategy")
@@ -48,6 +53,14 @@ public class RedPacketService {
     private static final String GRAB_USER_PREFIX = "redpacket:grabbers:";
     private static final String DETAIL_PREFIX = "redpacket:detail:";
     private static final String RECORD_PREFIX = "redpacket:record:";
+    private static final String PARTDETAIL_PREFIX = "redpacket:partDetail:";
+    private static final DefaultRedisScript<Long> UPDATE_SCRIPT;
+
+    static {
+        UPDATE_SCRIPT = new DefaultRedisScript<>();
+        UPDATE_SCRIPT.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/updateRedPacketHash.lua")));
+        UPDATE_SCRIPT.setResultType(Long.class);
+    }
 
     public String sendRedPacket(String creatorId, BigDecimal totalAmount, int totalCount, String type, String wish) {
         String redPacketId = RedisUtil.generateId();
@@ -84,6 +97,13 @@ public class RedPacketService {
 
         redisTemplate.opsForSet().add(grabUserKey, "init");
         redisTemplate.expire(grabUserKey, 24, TimeUnit.HOURS);
+
+        //创建部分详情
+        String detailPartKey = PARTDETAIL_PREFIX + redPacketId;
+        redisTemplate.opsForHash().put(detailPartKey, "remainAmount", redPacket.getRemainAmount().toPlainString());
+        redisTemplate.opsForHash().put(detailPartKey, "remainCount", String.valueOf(redPacket.getTotalCount()));
+        redisTemplate.opsForHash().put(detailPartKey, "status", String.valueOf(redPacket.getStatus()));
+        redisTemplate.expire(detailPartKey, 24, TimeUnit.HOURS);
 
 
         return redPacketId;
@@ -184,24 +204,20 @@ public class RedPacketService {
      * @param amount
      */
     private void updateRedPacketDetail(String redPacketId, BigDecimal amount) {
+        String detailPartKey = PARTDETAIL_PREFIX + redPacketId;
+        Long ttl = redisTemplate.getExpire(detailPartKey, TimeUnit.SECONDS);
+        long expireSec = (ttl != null && ttl > 0) ? ttl : 0L;
 
+        System.out.println("amount str: " + amount.toPlainString());
+        System.out.println("expireSec str: " + expireSec);
+        Long result = stringRedisTemplate.execute(UPDATE_SCRIPT,
+                Collections.singletonList(detailPartKey),
+                amount.toPlainString(),
+                String.valueOf(expireSec));
 
-        String detailKey = DETAIL_PREFIX + redPacketId;
-        // 获取剩余的过期时间（单位：秒）
-        Long ttl = redisTemplate.getExpire(detailKey, TimeUnit.SECONDS);
-        RedPacket redPacket = (RedPacket) redisTemplate.opsForValue().get(detailKey);
-
-        redPacket.setRemainAmount(redPacket.getRemainAmount().subtract(amount));
-        redPacket.setRemainCount(redPacket.getRemainCount() - 1);
-        if (redPacket.getRemainCount().equals(0)) {
-            redPacket.setStatus(3);
-        } else {
-            redPacket.setStatus(2);
-        }
-//        log.info("更新红包详情：{}",redPacket);
-        redisTemplate.opsForValue().set(detailKey,redPacket);
-        if (ttl != null && ttl > 0) {
-            redisTemplate.expire(detailKey, ttl, TimeUnit.SECONDS);
+        System.out.println("result: " + result);
+        if (result == -1) {
+            throw new RuntimeException("红包详情不存在");
         }
     }
 
@@ -241,6 +257,12 @@ public class RedPacketService {
      */
     public RedPacket getRedPacketDetail(String redPacketId) {
         String detailKey = DETAIL_PREFIX + redPacketId;
-        return (RedPacket) redisTemplate.opsForValue().get(detailKey);
+        String partDetailKey = PARTDETAIL_PREFIX + redPacketId;
+        RedPacket redPacket = (RedPacket)redisTemplate.opsForValue().get(detailKey);
+        Map<Object, Object> entries = stringRedisTemplate.opsForHash().entries(partDetailKey);
+        redPacket.setRemainAmount(new BigDecimal(entries.get("remainAmount").toString()));
+        redPacket.setRemainCount(Integer.parseInt(entries.get("remainCount").toString()));
+        redPacket.setStatus(Integer.parseInt(entries.get("status").toString()));
+        return redPacket;
     }
 }
